@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "clockbars"
 version = "1.1.0"
-description = "Bars sampled on the market's own clock: tick, volume, and dollar bars in Polars, batch and streaming with proven parity."
+description = "Bars on the market's clock: nine sampling kinds in Polars, provably identical across batch, live, and out-of-core."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
