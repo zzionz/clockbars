@@ -32,6 +32,28 @@ The newest large study complicates the case on wash-traded crypto volume
 [What the evidence says](#what-the-evidence-says).
 
 ```mermaid
+%%{init: {
+  "theme": "dark",
+  "themeVariables": {
+    "background": "#0d0b0c",
+    "primaryColor": "#1a0e10",
+    "primaryTextColor": "#efe6e4",
+    "primaryBorderColor": "#e63946",
+    "secondaryColor": "#241418",
+    "secondaryTextColor": "#efe6e4",
+    "secondaryBorderColor": "#891826",
+    "tertiaryColor": "#0d0b0c",
+    "tertiaryTextColor": "#b8b3b1",
+    "tertiaryBorderColor": "#2a2224",
+    "lineColor": "#891826",
+    "textColor": "#efe6e4",
+    "mainBkg": "#1a0e10",
+    "nodeBorder": "#e63946",
+    "clusterBkg": "#0d0b0c",
+    "titleColor": "#efe6e4",
+    "edgeLabelBackground": "#0d0b0c"
+  }
+}}%%
 flowchart LR
     T["trades (ts, price, size)"] --> Q{"what closes a bar?"}
     Q -->|"a fixed amount: count, units, or notional"| K["tick / volume / dollar"]
@@ -50,6 +72,16 @@ flowchart LR
     B --> P["parity: all paths, the same bars"]
     U --> P
     O --> P
+
+    classDef threshold fill:#1a0e10,stroke:#e63946,stroke-width:2px,color:#efe6e4
+    classDef flow fill:#241418,stroke:#891826,stroke-width:2px,color:#efe6e4
+    classDef path fill:#0d0b0c,stroke:#2a2224,stroke-width:1px,color:#b8b3b1
+
+    class K threshold
+    class I,R,C flow
+    class M threshold
+    class B,U,O path
+    class P flow
 ```
 
 ## Install
