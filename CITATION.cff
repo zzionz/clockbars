@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use clockbars in your research, please cite it."
+type: software
+title: clockbars
+authors:
+  - alias: zzionz
+version: 1.0.0
+date-released: "2026-11-27"
+license: MIT
+repository-code: "https://github.com/zzionz/clockbars"
+abstract: >-
+  Bars on the market's clock: tick, volume, and dollar bars in Polars, one
+  call from DataFrame to DataFrame, with a streaming builder held to parity
+  with the batch path and session-aware construction.
+keywords:
+  - quantitative-finance
+  - market-microstructure
+  - financial-data
+  - polars
+  - order-flow
+related-identifiers:
+  - type: url
+    value: "https://github.com/zzionz/clockbars/blob/main/docs/paper.md"
+    description: Accompanying paper
