@@ -254,7 +254,7 @@ def make_overshoot() -> None:
 
     colors_bad = [MUTED, MUTED, CRIMSON, MUTED]
 
-    for _j, (hx, ht) in enumerate(zip([0.0, 1.0, 2.0, 3.0], headers)):
+    for _j, (hx, ht) in enumerate(zip([0.0, 1.0, 2.0, 3.0], headers, strict=True)):
         ax.text(hx + 0.5, header_y, ht, ha="center", va="center",
                 fontsize=10, fontweight="bold", color=INK)
 
