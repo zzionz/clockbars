@@ -292,7 +292,8 @@ def make_overshoot() -> None:
 
     fig.text(
         0.5, 0.02,
-        "the global cumulative sum charges bar 0's overshoot to bar 1, which closes below threshold",
+        "the global cumulative sum charges bar 0's overshoot to bar 1,"
+        " which closes below threshold",
         ha="center", fontsize=8, color=MUTED, style="italic",
     )
 
