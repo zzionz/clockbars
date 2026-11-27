@@ -339,9 +339,6 @@ timestamps are rejected, same as naive Polars ones.
 
 ## Related work
 
-Three implementations matter, and pretending otherwise would be the first
-sign of a promotional README.
-
 **[bar-forge](https://github.com/bmouler/bar-forge)** (Mouler, 2026) is the
 closest contemporary: tick, volume, dollar, and fixed-threshold imbalance
 bars over NumPy trade records, plus strictly causal normalization
