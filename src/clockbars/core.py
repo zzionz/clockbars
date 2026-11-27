@@ -33,7 +33,27 @@ from typing import Literal
 import numpy as np
 import polars as pl
 
-BarKind = Literal["tick", "volume", "dollar", "time"]
+from clockbars.adaptive import (
+    _check_imbalance_seed,
+    _check_positive_float,
+    _check_window,
+    cusum_bounds,
+    imbalance_bounds,
+    runs_bounds,
+    tick_rule_signs,
+)
+
+BarKind = Literal[
+    "tick",
+    "volume",
+    "dollar",
+    "time",
+    "tick_imbalance",
+    "volume_imbalance",
+    "dollar_imbalance",
+    "runs",
+    "cusum",
+]
 
 _REQUIRED = ("ts", "price", "size")
 
@@ -278,31 +298,44 @@ def _bar_bounds(metric: np.ndarray, threshold: float) -> list[int]:
     return bounds
 
 
-def _aggregate(df: pl.DataFrame, threshold: float | None) -> pl.DataFrame:
+def _aggregate(
+    df: pl.DataFrame,
+    threshold: float | None,
+    *,
+    partial_column: bool = False,
+) -> pl.DataFrame:
+    expressions = [
+        pl.col("ts").first().alias("start_ts"),
+        pl.col("ts").last().alias("end_ts"),
+        pl.col("price").first().alias("open"),
+        pl.col("price").max().alias("high"),
+        pl.col("price").min().alias("low"),
+        pl.col("price").last().alias("close"),
+        pl.col("size").sum().alias("volume"),
+        (pl.col("size").cast(pl.Float64) * pl.col("price"))
+        .sum()
+        .alias("notional"),
+        pl.len().alias("n_trades"),
+    ]
+    if not partial_column:
+        expressions.append(pl.col("_metric").sum().alias("_target"))
+    else:
+        # The flag is constant within a bar, so first() carries it through.
+        expressions.append(pl.col("_is_partial").first().alias("_partial_flag"))
+
     bars = (
         df.group_by("bar_id", maintain_order=True)
-        .agg(
-            pl.col("ts").first().alias("start_ts"),
-            pl.col("ts").last().alias("end_ts"),
-            pl.col("price").first().alias("open"),
-            pl.col("price").max().alias("high"),
-            pl.col("price").min().alias("low"),
-            pl.col("price").last().alias("close"),
-            pl.col("size").sum().alias("volume"),
-            (pl.col("size").cast(pl.Float64) * pl.col("price"))
-            .sum()
-            .alias("notional"),
-            pl.col("_metric").sum().alias("_target"),
-            pl.len().alias("n_trades"),
-        )
+        .agg(*expressions)
         .sort("bar_id")
     )
 
-    partial = (
-        pl.lit(False)
-        if threshold is None
-        else pl.col("_target") < threshold * (1.0 - _ATOL)
-    )
+    if partial_column:
+        partial = pl.col("_partial_flag")
+    else:
+        # The batch threshold path always carries a threshold; the adaptive
+        # path always carries the flag column.
+        assert threshold is not None, "batch aggregation requires a threshold"
+        partial = pl.col("_target") < threshold * (1.0 - _ATOL)
 
     bars = bars.with_columns(
         (pl.col("end_ts") - pl.col("start_ts")).alias("duration"),
@@ -384,6 +417,67 @@ def _time_bars(trades: pl.DataFrame, every: str) -> pl.DataFrame:
     return bars.select(_BAR_COLUMNS)
 
 
+def _adaptive_bars(
+    trades: pl.DataFrame,
+    kind: str,
+    *,
+    expected_trades: float,
+    expected_imbalance: float,
+    window: int,
+    h: float,
+    session_starts: pl.Series | Sequence[datetime] | None,
+) -> pl.DataFrame:
+    """Build one of the flow-sampled kinds: imbalance, runs, or cusum.
+
+    Segmentation comes from the bounds functions in clockbars.adaptive,
+    which return the start and partial flag of every bar. Aggregation then
+    follows the shared pipeline, with the partial flag supplied per bar.
+    """
+    trades = validate_trades(trades)
+    prices = trades["price"].to_numpy().astype(np.float64, copy=False)
+    signs = tick_rule_signs(prices)
+
+    if session_starts is None:
+        segment_indices = np.array([0], dtype=np.int64)
+    else:
+        starts_ns = _session_starts_ns(session_starts)
+        ts_ns = trades["ts"].dt.cast_time_unit("ns").cast(pl.Int64).to_numpy()
+        segment_indices = _segment_start_indices(ts_ns, starts_ns)
+
+    if kind == "runs":
+        starts, partials, _ = runs_bounds(
+            signs, segment_indices, expected_trades=expected_trades, window=window
+        )
+    elif kind == "cusum":
+        starts, partials, _ = cusum_bounds(prices, segment_indices, h=h)
+    else:
+        base = {
+            "tick_imbalance": "tick",
+            "volume_imbalance": "volume",
+            "dollar_imbalance": "dollar",
+        }[kind]
+        metric = _metric_values(trades, base)
+        starts, partials, _ = imbalance_bounds(
+            metric,
+            signs,
+            segment_indices,
+            expected_trades=expected_trades,
+            expected_imbalance=expected_imbalance,
+            window=window,
+        )
+
+    n = prices.size
+    lengths = np.diff(np.append(np.asarray(starts, dtype=np.int64), n))
+    bar_ids = np.repeat(np.arange(len(starts), dtype=np.int64), lengths)
+    is_partial = np.repeat(np.asarray(partials, dtype=bool), lengths)
+
+    labelled = trades.with_columns(
+        pl.Series("bar_id", bar_ids, dtype=pl.Int64),
+        pl.Series("_is_partial", is_partial, dtype=pl.Boolean),
+    )
+    return _aggregate(labelled, None, partial_column=True)
+
+
 def resample(
     trades: pl.DataFrame,
     kind: BarKind = "dollar",
@@ -391,6 +485,10 @@ def resample(
     threshold: float | None = None,
     every: str | None = None,
     session_starts: pl.Series | Sequence[datetime] | None = None,
+    expected_trades: float | None = None,
+    expected_imbalance: float | None = None,
+    window: int | None = None,
+    h: float | None = None,
 ) -> pl.DataFrame:
     """Build bars from a trades frame.
 
@@ -400,7 +498,9 @@ def resample(
         Frame with ``ts`` (timezone-aware datetime), ``price``, ``size``.
         Must be sorted ascending by ``ts``.
     kind
-        ``"tick"``, ``"volume"``, ``"dollar"``, or ``"time"``.
+        ``"tick"``, ``"volume"``, ``"dollar"``, ``"time"``,
+        ``"tick_imbalance"``, ``"volume_imbalance"``,
+        ``"dollar_imbalance"``, ``"runs"``, or ``"cusum"``.
     threshold
         Accumulated quantity that closes a bar. Required for ``tick`` (number of
         trades), ``volume`` (units), and ``dollar`` (quote-currency notional).
@@ -413,12 +513,27 @@ def resample(
         wall-clock boundaries, so a 1-minute window starting at 09:30:30 still
         begins at 09:30:00.
     session_starts
-        Session boundary timestamps (timezone-aware, ascending). Threshold bars
-        restart accumulation at each boundary, so a bar never straddles a
-        rollover, and a trade exactly on a boundary belongs to the new session.
-        Each session's final bar carries ``is_partial=True`` if it fell short of
-        the threshold. Time bars need no cuts — the clock already makes them —
-        and passing both raises rather than guessing a precedence.
+        Session boundary timestamps (timezone-aware, ascending). Threshold and
+        flow-sampled bars restart accumulation at each boundary, so a bar never
+        straddles a rollover, and a trade exactly on a boundary belongs to the
+        new session. A session's final bar carries ``is_partial=True`` if it
+        never reached its target. Time bars need no cuts, since the clock
+        already makes them, and passing both raises rather than guessing a
+        precedence.
+    expected_trades
+        Seed for the EWMA estimate of trades per bar. Required for the
+        imbalance and runs kinds; only completed bars refine it.
+    expected_imbalance
+        Seed for the EWMA estimate of per-trade signed metric, in the metric's
+        units (trades for tick, units for volume, quote notional for dollar).
+        Required for the imbalance kinds, and must be nonzero: a zero seed
+        collapses every bar to a single trade.
+    window
+        EWMA window in completed bars, ``alpha = 2 / (window + 1)``. Defaults
+        to 100 for the adaptive kinds.
+    h
+        The cumulative price move that closes a CUSUM bar, in price units.
+        Required for ``kind="cusum"``.
 
     Returns
     -------
@@ -429,9 +544,14 @@ def resample(
 
     Notes
     -----
-    ``is_partial`` is ``True`` for a bar whose segment ended before it filled —
+    ``is_partial`` is ``True`` for a bar whose segment ended before it filled:
     the end of the stream, or the end of a session. Time bars never set it,
-    because a time window has no volume target to miss.
+    because a time window has no target to miss.
+
+    The flow-sampled kinds share one sign convention, the tick rule: a trade
+    is signed +1 on a rise against the previous trade, -1 on a fall, a flat
+    price carries the previous sign, and a stream's first trade is +1. Signs
+    are a property of the stream and carry across bar and session boundaries.
     """
     if kind == "time":
         if every is None:
@@ -444,13 +564,71 @@ def resample(
             )
         return _time_bars(trades, every)
 
-    if kind not in ("tick", "volume", "dollar"):
-        raise ValueError(
-            f"unknown kind {kind!r}; expected 'tick', 'volume', 'dollar', or 'time'"
-        )
-    if threshold is None:
-        raise ValueError(f"kind={kind!r} requires threshold=")
-    if every is not None:
-        raise ValueError(f"kind={kind!r} takes threshold=..., not every=")
+    if kind in ("tick", "volume", "dollar"):
+        if threshold is None:
+            raise ValueError(f"kind={kind!r} requires threshold=")
+        if every is not None:
+            raise ValueError(f"kind={kind!r} takes threshold=..., not every=")
+        if expected_trades is not None or expected_imbalance is not None or h is not None:
+            raise ValueError(
+                f"kind={kind!r} takes threshold=..., not the adaptive parameters"
+            )
+        if window is not None:
+            raise ValueError(f"kind={kind!r} takes threshold=..., not window=")
+        return _threshold_bars(trades, kind, threshold, session_starts)
 
-    return _threshold_bars(trades, kind, threshold, session_starts)
+    ewma_window = _check_window(window if window is not None else 100)
+
+    if kind == "runs":
+        if expected_trades is None:
+            raise ValueError("kind='runs' requires expected_trades=...")
+        if threshold is not None or every is not None:
+            raise ValueError("kind='runs' takes expected_trades=..., not threshold/every")
+        if expected_imbalance is not None or h is not None:
+            raise ValueError("kind='runs' takes no expected_imbalance or h")
+        return _adaptive_bars(
+            trades,
+            kind,
+            expected_trades=_check_positive_float(expected_trades, "expected_trades"),
+            expected_imbalance=0.0,
+            window=ewma_window,
+            h=0.0,
+            session_starts=session_starts,
+        )
+
+    if kind == "cusum":
+        if h is None:
+            raise ValueError("kind='cusum' requires h=..., the price move that closes a bar")
+        if threshold is not None or every is not None:
+            raise ValueError("kind='cusum' takes h=..., not threshold/every")
+        if expected_trades is not None or expected_imbalance is not None or window is not None:
+            raise ValueError("kind='cusum' takes h=..., not the adaptive parameters")
+        return _adaptive_bars(
+            trades,
+            kind,
+            expected_trades=0.0,
+            expected_imbalance=0.0,
+            window=ewma_window,
+            h=_check_positive_float(h, "h"),
+            session_starts=session_starts,
+        )
+
+    if kind in ("tick_imbalance", "volume_imbalance", "dollar_imbalance"):
+        if expected_trades is None or expected_imbalance is None:
+            raise ValueError(f"kind={kind!r} requires expected_trades= and expected_imbalance=")
+        if threshold is not None or every is not None or h is not None:
+            raise ValueError(f"kind={kind!r} takes its seeds, not threshold/every/h")
+        return _adaptive_bars(
+            trades,
+            kind,
+            expected_trades=_check_positive_float(expected_trades, "expected_trades"),
+            expected_imbalance=_check_imbalance_seed(expected_imbalance),
+            window=ewma_window,
+            h=0.0,
+            session_starts=session_starts,
+        )
+
+    raise ValueError(
+        "unknown kind {kind!r}; expected 'tick', 'volume', 'dollar', 'time', "
+        "'tick_imbalance', 'volume_imbalance', 'dollar_imbalance', 'runs', or 'cusum'"
+    )

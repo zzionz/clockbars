@@ -375,6 +375,8 @@ strategies live on.
 - Oomen, R. C. A. 2006. "Properties of Realized Variance Under Alternative
   Sampling Schemes." *Journal of Business and Economic Statistics* 24 (2).
   https://doi.org/10.1198/073500106000000044
+- Page, E. S. 1954. "Continuous Inspection Schemes." *Biometrika* 41
+  (1–2): 100–115. https://doi.org/10.1093/biomet/41.1-2.100
 
 Software:
 

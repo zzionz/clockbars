@@ -4,6 +4,49 @@ Notable changes to clockbars are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/).
 
+## [1.1.0] - 2026-11-27
+
+### Added
+
+- Imbalance bars, EWMA-adaptive, for tick, volume, and dollar metrics.
+  Signs follow the tick rule (+1 rise, -1 fall, flat carries, first trade
+  +1), the metric accumulates left to right from zero, and the bar closes
+  when the signed metric reaches E[T] * |e|, both estimates updated only on
+  completed bars. The user seeds both; the data refines them.
+- Runs bars: a bar closes when the streak of consecutive same-signed trades
+  reaches E[T] * max(P, 1 - P), with P an EWMA of the buy fraction. A
+  bar's first trade starts a fresh streak. Alternating flow never builds a
+  streak, so a bar can stay open until a session cut, which is the rule's
+  honest output and a diagnostic.
+- CUSUM-filtered bars (Page, 1954): the bar closes when the cumulative
+  price change since the last reset drifts h above its running minimum or
+  h below its running maximum. Both accumulators reset on close and on a
+  session cut. h is in price units.
+- `push_chunk`: the out-of-core entry point. Vectorised per chunk,
+  honouring carried state, with the prepend-carry trick that reproduces the
+  one-trade-at-a-time order of addition exactly. A bar open at a chunk
+  boundary continues across it and closes with its true counts, so every
+  adaptive estimate stays on the batch trajectory. 239 tests at 100 percent
+  statement coverage, strict mypy, CI on Ubuntu and Windows across Python
+  3.11 through 3.14.
+- Dark figures in one palette: near-black ground, crimson for the activity
+  clock, silver for the wall clock. `examples/make_figures.py` regenerates
+  both `docs/hero.png` and `docs/cusum.png` from a seed.
+- Three real bugs found and fixed in the process, each now pinned by a
+  regression test: double-signing in the chunked path (the metric arrived
+  already signed), carried bars closing with their chunk-local length
+  instead of their true length (which corrupted every adaptive estimate
+  after a chunk-spanning closure), and a stale has_open reset that
+  silently disabled the true-length fix.
+
+### Changed
+
+- README rewritten around the nine kinds and three execution paths, with
+  real terminal output in the quickstart, the overshoot worked example as
+  a table, the flowchart updated for the new kinds, and no roadmap. The
+  paper's related-work section drops its opening line, per a reader's
+  suggestion.
+
 ## [1.0.0] - 2026-11-27
 
 Initial public release.

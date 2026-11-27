@@ -2,12 +2,12 @@
 
 **Bars on the market's clock.** Every bar closes when a set amount of trading
 has actually happened. Quiet minutes produce nothing, busy ones produce
-plenty. Tick, volume, and dollar bars in Polars, built the same way in batch
-and in a live stream.
+plenty. Nine kinds of bars in Polars, built the same way in batch, in a live
+stream, and out of core.
 
 [![PyPI](https://img.shields.io/pypi/v/clockbars)](https://pypi.org/project/clockbars/)
 [![CI](https://github.com/zzionz/clockbars/actions/workflows/ci.yml/badge.svg)](https://github.com/zzionz/clockbars/actions/workflows/ci.yml)
-![Tests](https://img.shields.io/badge/tests-172-blue)
+![Tests](https://img.shields.io/badge/tests-239-blue)
 ![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![Typed](https://img.shields.io/badge/typing-mypy_strict-blue)
@@ -20,8 +20,8 @@ it a row, repeat. Markets do not produce information at a constant rate, so
 the result is uneven by construction. The first and last half hour of a
 session carry several times the volume of midday, which means a 1-minute bar
 at 09:31 and a 1-minute bar at 12:31 agree in duration while differing by an
-order of magnitude in content. Downstream code treats them as equal rows,
-and every statistic computed on the series inherits the unevenness.
+order of magnitude in content. Downstream code treats them as equal rows, and
+every statistic computed on the series inherits the unevenness.
 
 Sampling by activity is the old fix, and it has been measured on real data.
 Transaction-time sampling cut the mean squared error of a standard variance
@@ -34,18 +34,22 @@ The newest large study complicates the case on wash-traded crypto volume
 ```mermaid
 flowchart LR
     T["trades (ts, price, size)"] --> Q{"what closes a bar?"}
-    Q -->|"trade count"| K["tick"]
-    Q -->|"units traded"| V["volume"]
-    Q -->|"notional traded"| D["dollar"]
-    Q -->|"clock interval"| M["time"]
+    Q -->|"a fixed amount: count, units, or notional"| K["tick / volume / dollar"]
+    Q -->|"signed flow vs an adaptive target"| I["imbalance: tick / volume / dollar"]
+    Q -->|"a streak of same-signed trades"| R["runs"]
+    Q -->|"a cumulative price move"| C["cusum"]
+    Q -->|"the clock"| M["time"]
     K --> S["one shared 13-column schema"]
-    V --> S
-    D --> S
+    I --> S
+    R --> S
+    C --> S
     M --> S
-    S --> B["resample: batch, Polars frame in and out"]
-    S --> U["BarBuilder: one trade at a time, for live feeds"]
-    B --> P["parity test holds both paths to the same bars"]
+    S --> B["resample: batch, one call"]
+    S --> U["BarBuilder: live, one trade at a time"]
+    S --> O["push_chunk: out of core, one slice at a time"]
+    B --> P["parity: all paths, the same bars"]
     U --> P
+    O --> P
 ```
 
 ## Install
@@ -60,7 +64,7 @@ For development:
 git clone https://github.com/zzionz/clockbars.git
 cd clockbars
 uv sync --all-extras
-uv run pytest -q   # 172 passed, 100% coverage enforced
+uv run pytest -q   # 239 passed, 100% coverage enforced
 ```
 
 CI runs the full gate set on every push: ruff, strict mypy, and the test
@@ -70,7 +74,7 @@ use clockbars under mypy you get its types, not `Any`.
 
 ## Quickstart
 
-Build bars from a sorted stream of trades, all four kinds returning the
+Build bars from a sorted stream of trades, all nine kinds returning the
 same schema. On the seeded synthetic stream (50,000 trades, 3 sessions):
 
 ```python
@@ -101,11 +105,58 @@ shape: (3, 7)
 └─────────────────────┴─────────────────────┴────────┴─────────┴───────────┴──────────┴────────────┘
 ```
 
+### Flow-sampled kinds
+
+Three kinds close on order flow, not on a fixed amount of it, and all
+three share one sign convention, the tick rule: a trade is signed +1 on a
+rise against the previous trade, -1 on a fall, a flat price carries the
+previous sign, and a stream's first trade is +1.
+
+Imbalance bars (Lopez de Prado ch. 2) accumulate the signed metric and close
+when it reaches an adaptive target: the expected trades per bar times the
+expected per-trade signed metric, both EWMA estimates your seeds start and
+only completed bars refine:
+
+```python
+flow = resample(trades, kind="dollar_imbalance",
+                expected_trades=200, expected_imbalance=5_000.0, window=100)
+```
+
+Runs bars close when a streak of consecutive same-signed trades reaches
+`E[T] * max(P, 1 - P)`, with `P` an EWMA of the buy fraction. Alternating
+flow never builds a streak, so a bar can stay open until a session cut: that
+is the rule's honest output, and it is a diagnostic.
+
+```python
+runs = resample(trades, kind="runs", expected_trades=60, window=100)
+```
+
+CUSUM bars (Page, 1954) are the purest activity clock here: the bar closes
+when the cumulative price change since the last reset drifts `h` above its
+running minimum or `h` below its running maximum. This is the scheme that
+won the only published head-to-head comparison of sampling schemes for
+trading (Grądzki, Wójcik, and Lessmann, 2025):
+
+```python
+cusum = resample(trades, kind="cusum", h=3.0)
+```
+
+```text
+cusum (h=3.0) bars in the busiest session:   48
+time (1m) bars in the same session:         390
+```
+
+![CUSUM bars against time bars](docs/cusum.png)
+
+The vertical lines are CUSUM bar boundaries: they cluster where price moves
+and thin out where it drifts sideways, which is the point.
+
 ### Session cuts
 
 Pass the rollover times and accumulation restarts at each boundary. A bar
 never spans the overnight close, the boundary trade belongs to the new
-session, and a session's final short bar is flagged partial:
+session, and a session's final short bar is flagged partial. Works for
+every kind except time, which the clock already cuts:
 
 ```python
 from datetime import UTC, datetime
@@ -157,13 +208,35 @@ for ts, price, size in feed:
 trailing = builder.flush()                # the final partial bar
 ```
 
-A parity test holds the streaming path to agreement with the batch path, at
-200,000 trades, all four kinds, session cuts included. Exact agreement on
-everything that decides what a bar is: boundaries, ids, timestamps, OHLC,
-counts, partial flags. Per-bar volume, notional, and vwap agree to within
-float-summation order (at most 1e-12 relative), because a vectorised group
-sum and a sequential accumulator sum the same numbers in different orders.
-From the run above:
+### Out of core
+
+`push_chunk` is the vectorised entry point for streams that do not fit in
+memory: scan a Parquet file in slices, push each slice, concatenate the
+returned frames. A bar open at a slice boundary continues across it, and the
+carried state includes the bar's true trade count, so a bar that spans a
+hundred slices still closes with the EWMA inputs of one bar:
+
+```python
+from clockbars import BarBuilder, bars_to_frame
+
+builder = BarBuilder(kind="dollar", threshold=5_000_000)
+frames = []
+for chunk in pl.scan_parquet("trades.parquet").collect_batches(100_000):
+    frames.append(builder.push_chunk(chunk))
+tail = builder.flush()
+if tail is not None:
+    frames.append(bars_to_frame([tail]))
+bars = pl.concat(frames)
+```
+
+A parity test holds all three paths, batch and streamed and chunked, to
+agreement on everything that decides what a bar is: boundaries, ids,
+timestamps, OHLC, counts, partial flags, at 200,000 trades for the threshold
+kinds and 100,000 for CUSUM, across slice boundaries that include
+single-trade slices and slices that split a bar mid-streak. Per-bar volume
+and notional agree to within float-summation order (at most 1e-12 relative),
+because a vectorised group sum and a sequential accumulator sum the same
+numbers in different orders. From the run above:
 
 ```text
 batch: 160 bars | streamed: 160 bars
@@ -172,9 +245,11 @@ identical boundaries, timestamps, OHLC, flags: True
 
 ## The rule, and the decisions inside it
 
-A bar closes on the trade that pushes its running total to the threshold,
-and that trade is included in the closing bar. Each bar then restarts from
-zero. Everything else follows.
+A threshold bar closes on the trade that pushes its running total to the
+threshold, and that trade is included in the closing bar. Each bar then
+restarts from zero. The flow-sampled kinds close on their own targets, all
+restart from zero, and a session cut or the end of the stream ends whatever
+bar is open, flagged partial. Everything else follows.
 
 Worked example: threshold 250, trades of 200, 100, then 27 trades of 10.
 The obvious vectorised implementation is a global cumulative sum, and it has
@@ -185,7 +260,7 @@ a defect. It charges each bar's overshoot to the next bar:
 | clockbars (restart at zero) | 300, closed | 250, closed | 20, partial |
 | global cumulative sum | 300, closed | 200, **below threshold** | 70, partial |
 
-The eight decisions below are each enforced by a named test:
+The decisions below are each enforced by a named test:
 
 1. **A closed bar's total is always at least its threshold.** It can
    overshoot only by the size of its own final trade.
@@ -209,6 +284,16 @@ The eight decisions below are each enforced by a named test:
 8. **Input must be sorted.** Unsorted input is an error, not a silent
    `sort()`. Sorting implicitly is a policy decision about your data, and it
    is not this library's to make.
+9. **Signs follow the tick rule and belong to the stream.** They carry
+   across bar and session boundaries, because a trade's sign is a property
+   of the trade, not of the bar it lands in.
+10. **Adaptive estimates update only on completed bars.** The imbalance and
+    runs kinds never look at the bar currently forming, so they are causal
+    by construction, not by convention.
+11. **A bar carried across chunk boundaries keeps its true counts.** A bar
+    open at a slice boundary closes with the length it actually ran, not the
+    length visible in one slice, or every adaptive estimate after it
+    diverges. `test_chunk_spanning_a_bar_uses_its_true_length` pins this.
 
 Time bars follow the same schema with `is_partial` always `False`. Windows
 are half-open `[start, start + every)` and align to wall-clock boundaries: a
@@ -219,7 +304,7 @@ cuts them; passing both raises instead of guessing a precedence.
 
 ## Output schema
 
-All four kinds return the same 13 columns, so nothing downstream has to
+All nine kinds return the same 13 columns, so nothing downstream has to
 branch on how the bars were made:
 
 | Column | Meaning |
@@ -232,7 +317,7 @@ branch on how the bars were made:
 | `notional` | price × size summed |
 | `vwap` | `notional / volume` |
 | `n_trades` | trade count |
-| `is_partial` | `True` only if the bar fell short of its threshold |
+| `is_partial` | `True` only if the bar fell short of its target |
 
 ## What the tests actually check
 
@@ -247,10 +332,15 @@ Not "the code runs." The properties that make the output trustworthy:
 - identical input yields identical output;
 - bars never straddle a session boundary, with the boundary trade going to
   the new session;
+- signs follow the tick rule, in one trade, one chunk, and one stream;
+- adaptive estimates update only on completed bars, and a bar carried across
+  chunks closes with its true counts;
 - the streaming `BarBuilder` matches `resample` exactly on boundaries,
   timestamps, OHLC, counts, and flags, and to 1e-12 relative on sums;
+- the chunked `push_chunk` matches both, across slice boundaries that split
+  bars mid-streak;
 - the whole suite of invariants also runs at 200,000-trade scale, streaming
-  parity included.
+  and chunked parity included.
 
 Plus every validation rule above, each with the input that breaks it.
 
@@ -260,7 +350,7 @@ Three results from three sources. The first is ours and reproducible from a
 seed. The other two are published studies on real data, and they point in
 opposite directions. All three belong here.
 
-`examples/make_hero.py` builds the figure and prints this table (seed 7,
+`examples/make_figures.py` builds both figures and prints this table (seed 7,
 dollar threshold matched to the median 1-minute notional so the comparison is
 fair):
 
@@ -311,31 +401,24 @@ timestamps are rejected, same as naive Polars ones.
 
 ## Limitations
 
-- Thresholds are absolute. Choosing one is still your job; a defensible
-  default is the median per-minute notional over your sample, which is what
-  the example does.
+- Thresholds and CUSUM's `h` are absolute. Choosing one is still your job; a
+  defensible default is the median per-minute notional over your sample,
+  which is what the example does.
 - Threshold bars are not uniform in time. Anything that assumes a fixed bar
   duration (annualisation factors, some indicator definitions) needs
   rethinking before it runs on them.
-- Imbalance and run bars are not implemented. Fixed-threshold versions exist
-  in bar-forge and EWMA-adaptive versions in mlfinpy; a Polars-native
-  implementation is on the roadmap.
+- The adaptive kinds' seeds matter. Far-from-reality seeds produce the
+  documented degenerate behaviour: a zero-ish expected imbalance collapses
+  every bar to a single trade. Seed from a sample of your data and check
+  the bar counts before trusting the output.
 - Session awareness means *your* boundaries: the library ships no exchange
   calendars. You provide the rollover times; `resample` guarantees the cut.
   Rollover contract-adjustment is still your problem.
-- Bar segmentation scans over bars, at `O(n_bars · log n_trades)`. With a
-  realistic threshold there are far fewer bars than trades. A tick threshold
+- Bar segmentation scans over bars, at `O(n_bars · log n_trades)` for the
+  threshold kinds and `O(n)` amortised for the flow-sampled kinds. With a
+  realistic target there are far fewer bars than trades. A tick threshold
   of 1 on a million trades is inherently one bar per trade and will not be
   fast; nothing makes that a good idea.
-
-## Roadmap
-
-- [ ] Imbalance bars, EWMA-adaptive (fixed-threshold versions exist in
-      bar-forge; adaptive ones in mlfinpy; a Polars port needs a reason
-      beyond porting)
-- [ ] Run bars
-- [ ] CUSUM-filtered sampling, the scheme that won in Grądzki et al. (2025)
-- [ ] Out-of-core chunked batch construction
 
 ## Related work
 
@@ -345,15 +428,16 @@ bars over NumPy trade records, plus strictly causal normalization
 transforms, with 100 percent coverage, strict mypy, and a mutation-testing
 run (1,208 mutants, 92.96 percent killed). Its bar conventions agree with
 ours where they overlap, which we read as both libraries deriving from the
-same source. It does not do sessions, streaming, or DataFrames, and it cites
-no literature. We do the first three and ship [a paper](docs/paper.md).
+same source. It does not do sessions, streaming, DataFrames, adaptive
+estimates, or CUSUM, and it cites no literature. We do all six and ship
+[a paper](docs/paper.md).
 
 **mlfinpy** is a free port of the mlfinlab data structures, including the
-EWMA-adaptive imbalance and run bars from López de Prado ch. 2, which we do
-not yet implement.
+EWMA-adaptive imbalance and run bars from Lopez de Prado ch. 2, which this
+library now implements natively with documented conventions.
 
 **[mlfinlab](https://github.com/hudson-and-thames/mlfinlab)** (Hudson &
-Thames) implements the full López de Prado catalogue; it began open source
+Thames) implements the full Lopez de Prado catalogue; it began open source
 and is now a commercial product.
 
 Practitioner tooling has followed the same trail: Databento's 2024 guest
@@ -375,7 +459,7 @@ If you use clockbars in research, cite it:
   author = {zzionz},
   title  = {clockbars: bars on the market's clock},
   url    = {https://github.com/zzionz/clockbars},
-  version = {1.0.0},
+  version = {1.1.0},
   year   = {2026}
 }
 ```
