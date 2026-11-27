@@ -9,9 +9,10 @@ date-released: "2026-11-27"
 license: MIT
 repository-code: "https://github.com/zzionz/clockbars"
 abstract: >-
-  Bars on the market's clock: tick, volume, and dollar bars in Polars, one
-  call from DataFrame to DataFrame, with a streaming builder held to parity
-  with the batch path and session-aware construction.
+  Bars on the market's clock: nine sampling kinds in Polars, provably
+  identical across batch, live, and out-of-core execution, with
+  session-aware construction and a written contract enforced by 239 tests
+  at 100 percent coverage.
 keywords:
   - quantitative-finance
   - market-microstructure
