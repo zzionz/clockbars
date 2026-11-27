@@ -236,11 +236,76 @@ def make_cusum(trades: pl.DataFrame) -> None:
     print(f"wrote {DOCS / 'cusum.png'}")
 
 
+def make_overshoot() -> None:
+    """The worked example as a figure: restart at zero vs global cumsum."""
+    fig, ax = plt.subplots(figsize=(10.5, 3.2), dpi=150, facecolor=GROUND)
+    ax.set_facecolor(GROUND)
+    ax.set_xlim(-0.5, 3.5)
+    ax.set_ylim(0, 4)
+    ax.axis("off")
+
+    header_y = 3.2
+    row1_y = 2.0
+    row2_y = 0.8
+
+    headers = ["", "bar 0", "bar 1", "bar 2"]
+    bars_good = ["clockbars\n(restart at zero)", "300\nclosed", "250\nclosed", "20\npartial"]
+    bars_bad = ["global\ncumulative sum", "300\nclosed", "200\nBELOW\nTHRESHOLD", "70\npartial"]
+
+    colors_bad = [MUTED, MUTED, CRIMSON, MUTED]
+
+    for _j, (hx, ht) in enumerate(zip([0.0, 1.0, 2.0, 3.0], headers)):
+        ax.text(hx + 0.5, header_y, ht, ha="center", va="center",
+                fontsize=10, fontweight="bold", color=INK)
+
+    for j in range(4):
+        text = bars_good[j]
+        color = INK if j > 0 else SILVER
+        weight = "normal"
+        box = dict(boxstyle="round,pad=0.4", facecolor="#1a0e10",
+                   edgecolor=CRIMSON, linewidth=1.2)
+        if j == 3:
+            color = MUTED
+        ax.text(j * 1.0 + 0.5, row1_y, text, ha="center", va="center",
+                fontsize=9, color=color, fontweight=weight, bbox=box)
+
+    for j in range(4):
+        text = bars_bad[j]
+        color = colors_bad[j]
+        weight = "normal"
+        if j == 2:
+            weight = "bold"
+        box = dict(boxstyle="round,pad=0.4", facecolor="#241418",
+                   edgecolor=CRIMSON if j == 2 else GRID, linewidth=1.2)
+        ax.text(j * 1.0 + 0.5, row2_y, text, ha="center", va="center",
+                fontsize=9, color=color, fontweight=weight, bbox=box)
+
+    ax.annotate("", xy=(0.5, header_y - 0.35), xytext=(0.5, row1_y + 0.45),
+                arrowprops=dict(arrowstyle="-", color=GRID, linewidth=0.8))
+    ax.annotate("", xy=(0.5, row1_y - 0.35), xytext=(0.5, row2_y + 0.45),
+                arrowprops=dict(arrowstyle="-", color=GRID, linewidth=0.8))
+
+    ax.set_title(
+        "threshold 250, trades: 200, 100, then 27 x 10",
+        fontsize=10, color=MUTED, pad=8,
+    )
+
+    fig.text(
+        0.5, 0.02,
+        "the global cumulative sum charges bar 0's overshoot to bar 1, which closes below threshold",
+        ha="center", fontsize=8, color=MUTED, style="italic",
+    )
+
+    fig.savefig(DOCS / "overshoot.png", facecolor=GROUND, bbox_inches="tight")
+    print(f"wrote {DOCS / 'overshoot.png'}")
+
+
 def main() -> None:
     trades = synthetic_ticks(n_trades=400_000, n_sessions=20, seed=7)
     DOCS.mkdir(parents=True, exist_ok=True)
     make_hero(trades)
     make_cusum(trades)
+    make_overshoot()
 
 
 if __name__ == "__main__":

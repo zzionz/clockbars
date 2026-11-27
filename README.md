@@ -287,10 +287,7 @@ Worked example: threshold 250, trades of 200, 100, then 27 trades of 10.
 The obvious vectorised implementation is a global cumulative sum, and it has
 a defect. It charges each bar's overshoot to the next bar:
 
-| | bar 0 | bar 1 | bar 2 |
-| :--- | ---: | ---: | ---: |
-| clockbars (restart at zero) | 300, closed | 250, closed | 20, partial |
-| global cumulative sum | 300, closed | 200, **below threshold** | 70, partial |
+![Overshoot worked example](docs/overshoot.png)
 
 The decisions below are each enforced by a named test:
 
