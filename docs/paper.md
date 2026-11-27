@@ -2,7 +2,7 @@
 
 **Nine sampling clocks, three execution paths, one shared contract, and four failure modes that hide in plausible-looking output**
 
-zzionz, DEUS Research Lab
+zzionz, Modeus Lab
 November 2026
 
 ---
